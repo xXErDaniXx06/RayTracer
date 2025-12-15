@@ -2,13 +2,12 @@
 #include <cmath>
 #include <random>
 #include <limits>
-#include <algorithm>
+#include <algorithm> // ¡Importante para que no te de error!
 
-// --- UTILIDADES ---
+// --- CONSTANTES Y UTILIDADES ---
 const double infinity = std::numeric_limits<double>::infinity();
 const double pi = 3.1415926535897932385;
 
-// Generador de números aleatorios
 inline double random_double() {
     static std::uniform_real_distribution<double> distribution(0.0, 1.0);
     static std::mt19937 generator;
@@ -27,22 +26,26 @@ struct vec3 {
     vec3 operator*(double t) const { return {x * t, y * t, z * t}; }
     vec3 operator/(double t) const { return {x / t, y / t, z / t}; }
     double dot(const vec3& v) const { return x * v.x + y * v.y + z * v.z; }
-    double length_squared() const { return x*x + y*y + z*z; }
+    double length() const { return std::sqrt(x*x + y*y + z*z); }
     
     vec3 normalize() const { 
-        double len = std::sqrt(length_squared());
+        double len = length();
         return {x/len, y/len, z/len}; 
     }
 };
 
-// Funciones extra para vectores
 vec3 operator*(double t, const vec3& v) { return {t*v.x, t*v.y, t*v.z}; }
 
-// Generar un vector aleatorio dentro de una esfera unitaria (para el rebote mate)
+// Función para rebotar la luz como un espejo (METAL)
+vec3 reflect(const vec3& v, const vec3& n) {
+    return v - 2 * v.dot(n) * n;
+}
+
+// Función para rebotar la luz aleatoriamente (MATE)
 vec3 random_in_unit_sphere() {
     while (true) {
         vec3 p = {random_double(-1,1), random_double(-1,1), random_double(-1,1)};
-        if (p.length_squared() >= 1) continue;
+        if (p.dot(p) >= 1) continue;
         return p;
     }
 }
@@ -53,8 +56,6 @@ void write_color(std::ostream &out, vec3 pixel_color, int samples_per_pixel) {
     auto g = pixel_color.y;
     auto b = pixel_color.z;
 
-    // Dividimos el color por el número de muestras (promedio) y aplicamos Gamma 2.0 (raíz cuadrada)
-    // Esto hace que la imagen se vea más brillante y realista
     double scale = 1.0 / samples_per_pixel;
     r = std::sqrt(scale * r);
     g = std::sqrt(scale * g);
@@ -65,7 +66,8 @@ void write_color(std::ostream &out, vec3 pixel_color, int samples_per_pixel) {
         << static_cast<int>(256 * std::clamp(b, 0.0, 0.999)) << '\n';
 }
 
-// --- FÍSICA ---
+// --- ESCENA ---
+// Calcula si golpeamos una esfera
 double hit_sphere(const vec3& center, double radius, const vec3& origin, const vec3& direction) {
     vec3 oc = origin - center;
     double a = direction.dot(direction);
@@ -77,37 +79,75 @@ double hit_sphere(const vec3& center, double radius, const vec3& origin, const v
 }
 
 // --- MOTOR DE LUZ ---
-// Ahora la función es recursiva: depth controla cuántas veces rebota el rayo
 vec3 ray_color(const vec3& origin, const vec3& direction, int depth) {
-    // Si el rayo ha rebotado muchas veces, deja de calcular luz (se vuelve negro)
     if (depth <= 0) return {0,0,0};
 
-    vec3 sphere_center = {0, 0, -1};
-    double t = hit_sphere(sphere_center, 0.5, origin, direction);
-    
-    if (t > 0.001) { // 0.001 para arreglar el "acné de sombra"
-        vec3 hit_point = origin + (direction * t);
-        vec3 N = (hit_point - sphere_center).normalize();
-        
-        // MATERIAL MATE: El rayo rebota en una dirección aleatoria
-        vec3 target = hit_point + N + random_in_unit_sphere();
-        
-        // Lanzamos un nuevo rayo desde el punto de choque hacia el objetivo aleatorio
-        // Y absorbemos el 50% de la luz (0.5) en cada rebote
-        return 0.5 * ray_color(hit_point, target - hit_point, depth - 1);
+    // Definimos 2 esferas en el mundo
+    vec3 esfera_mate_pos = {-0.6, 0, -1};  // Izquierda
+    vec3 esfera_metal_pos = {0.6, 0, -1};  // Derecha
+    double radio = 0.5;
+
+    // Comprobamos golpes
+    double t_mate = hit_sphere(esfera_mate_pos, radio, origin, direction);
+    double t_metal = hit_sphere(esfera_metal_pos, radio, origin, direction);
+
+    // Lógica simple para saber cuál está más cerca (Z-Buffer manual)
+    double t_final = infinity;
+    int tipo_material = 0; // 0=nada, 1=mate, 2=metal
+    vec3 pos_esfera_final;
+
+    if (t_mate > 0.001 && t_mate < t_final) {
+        t_final = t_mate;
+        tipo_material = 1;
+        pos_esfera_final = esfera_mate_pos;
     }
-    
+    if (t_metal > 0.001 && t_metal < t_final) {
+        t_final = t_metal;
+        tipo_material = 2;
+        pos_esfera_final = esfera_metal_pos;
+    }
+
+    // SI GOLPEAMOS ALGO
+    if (t_final < infinity) {
+        vec3 hit_point = origin + (direction * t_final);
+        vec3 N = (hit_point - pos_esfera_final).normalize();
+        vec3 target, attenuation;
+
+        if (tipo_material == 1) { 
+            // --- MATERIAL MATE (Azul/Gris) ---
+            target = hit_point + N + random_in_unit_sphere();
+            attenuation = {0.1, 0.2, 0.5}; // Color de la bola
+            return {attenuation.x * ray_color(hit_point, target - hit_point, depth-1).x,
+                    attenuation.y * ray_color(hit_point, target - hit_point, depth-1).y,
+                    attenuation.z * ray_color(hit_point, target - hit_point, depth-1).z};
+        } 
+        else if (tipo_material == 2) {
+            // --- MATERIAL METAL (Dorado) ---
+            vec3 reflected = reflect(direction.normalize(), N);
+            attenuation = {0.8, 0.6, 0.2}; // Color Oro
+            // Añadimos un poco de "fuzz" (borrosidad) multiplicando random por 0.1
+            vec3 scattered = reflected + (random_in_unit_sphere() * 0.1); 
+            
+            if (scattered.dot(N) > 0) {
+                 vec3 col = ray_color(hit_point, scattered, depth-1);
+                 return {attenuation.x * col.x, attenuation.y * col.y, attenuation.z * col.z};
+            }
+            return {0,0,0};
+        }
+    }
+
     // Fondo (Cielo)
     vec3 unit_direction = direction.normalize();
-    t = 0.5 * (unit_direction.y + 1.0);
+    double t = 0.5 * (unit_direction.y + 1.0);
     return (1.0 - t)*vec3{1.0, 1.0, 1.0} + t*vec3{0.5, 0.7, 1.0};
 }
 
+// --- MAIN ---
 int main() {
     const int image_width = 400;
     const int image_height = 225;
-    const int samples_per_pixel = 50; // ¡Antialiasing! Lanzamos 50 rayos por cada píxel
-    const int max_depth = 50; // Máximo 50 rebotes de luz
+    const int samples_per_pixel = 50; 
+    const int max_depth = 50;
 
     std::cout << "P3\n" << image_width << ' ' << image_height << "\n255\n";
 
@@ -120,8 +160,6 @@ int main() {
         std::clog << "\rLineas restantes: " << j << " " << std::flush;
         for (int i = 0; i < image_width; ++i) {
             vec3 pixel_color = {0, 0, 0};
-            
-            // Antialiasing: Promediamos varios rayos vecinos
             for (int s = 0; s < samples_per_pixel; ++s) {
                 double u = (i + random_double()) / (image_width-1);
                 double v = (j + random_double()) / (image_height-1);
@@ -131,5 +169,5 @@ int main() {
             write_color(std::cout, pixel_color, samples_per_pixel);
         }
     }
-    std::clog << "\rHecho.                 \n";
+    std::clog << "\rHecho.\n";
 }
